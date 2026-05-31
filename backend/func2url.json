@@ -1,3 +1,5 @@
 {
+  "telegram-setup": "https://functions.poehali.dev/1b4bfee1-417a-4099-982f-3863038c424c",
+  "telegram-bot": "https://functions.poehali.dev/519f25c6-22f6-4a7a-bafc-a7150b762566",
   "gemini-generate": "https://functions.poehali.dev/4cb42486-5daf-4535-8a8d-d11b08e318f8"
 }

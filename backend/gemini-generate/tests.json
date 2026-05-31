@@ -1,0 +1,19 @@
+{
+  "tests": [
+    {
+      "name": "OPTIONS preflight",
+      "method": "OPTIONS",
+      "path": "/",
+      "expectedStatus": 200
+    },
+    {
+      "name": "Пустой промт — ошибка",
+      "method": "POST",
+      "path": "/",
+      "body": {"prompt": "", "mode": "image"},
+      "expectedStatus": 400,
+      "expectedBody": {"error": "Промт не может быть пустым"},
+      "bodyMatcher": "partial"
+    }
+  ]
+}

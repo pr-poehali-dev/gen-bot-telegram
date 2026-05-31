@@ -1,5 +1,7 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import Icon from "@/components/ui/icon";
+
+const GEMINI_URL = "https://functions.poehali.dev/4cb42486-5daf-4535-8a8d-d11b08e318f8";
 
 type Section = "generator" | "modes" | "history" | "help" | "settings" | "profile" | "styles" | "admin";
 
@@ -60,12 +62,15 @@ interface Style {
   prompt: string;
 }
 
-const HISTORY = [
-  { id: 1, prompt: "Космический кот на луне в стиле аниме", model: "3.5 Flash", time: "2 мин назад", emoji: "🐱" },
-  { id: 2, prompt: "Волшебный лес на закате с феями", model: "3.1 Pro", time: "15 мин назад", emoji: "🌲" },
-  { id: 3, prompt: "Портрет киберпанк-девушки с неоновыми огнями", model: "3.1 Flash-Lite", time: "1 час назад", emoji: "👩" },
-  { id: 4, prompt: "Абстрактный вихрь из звёзд и планет", model: "3.5 Flash", time: "3 часа назад", emoji: "🌌" },
-];
+interface HistoryItem {
+  id: number;
+  prompt: string;
+  model: string;
+  time: string;
+  emoji: string;
+  imageBase64?: string;
+  mimeType?: string;
+}
 
 const ADMIN_PASSWORD = "admin123";
 
@@ -77,8 +82,16 @@ export default function Index() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [uploadedPhoto, setUploadedPhoto] = useState<string | null>(null);
   const [isPremium] = useState(false);
-  const [usedLimit, setUsedLimit] = useState(7);
+  const [usedLimit, setUsedLimit] = useState(0);
   const totalLimit = isPremium ? 999 : 10;
+
+  // Result
+  const [generatedImage, setGeneratedImage] = useState<string | null>(null);
+  const [generatedMime, setGeneratedMime] = useState("image/png");
+  const [generateError, setGenerateError] = useState<string | null>(null);
+
+  // History
+  const [history, setHistory] = useState<HistoryItem[]>([]);
 
   // Styles state
   const [styles, setStyles] = useState<Style[]>(DEFAULT_STYLES);
@@ -89,32 +102,81 @@ export default function Index() {
   const [adminInput, setAdminInput] = useState("");
   const [adminError, setAdminError] = useState("");
   const [newStyle, setNewStyle] = useState<Partial<Style>>({ category: "Арт", emoji: "🎨" });
-  const [editingStyle, setEditingStyle] = useState<string | null>(null);
 
   // Chat
   const [chatInput, setChatInput] = useState("");
+  const [isChatLoading, setIsChatLoading] = useState(false);
   const [chatMessages, setChatMessages] = useState([
-    { role: "bot", text: "Привет! 👋 Я GeminiBot — твой AI-помощник. Выбери модель, стиль и опиши изображение — я создам его для тебя!" },
+    { role: "bot", text: "Привет! 👋 Я GeminiBot — твой AI-помощник на базе Gemini. Задай любой вопрос или перейди в «Создать» для генерации изображений!" },
   ]);
+  const chatEndRef = useRef<HTMLDivElement>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chatMessages]);
 
   const navItems: { id: Section; emoji: string; label: string }[] = [
     { id: "generator", emoji: "🎨", label: "Создать" },
     { id: "styles", emoji: "🖼️", label: "Стили" },
     { id: "modes", emoji: "⚡", label: "Модели" },
     { id: "history", emoji: "🕐", label: "История" },
-    { id: "settings", emoji: "🔧", label: "Настройки" },
+    { id: "help", emoji: "💬", label: "Чат" },
     { id: "profile", emoji: "👤", label: "Профиль" },
   ];
 
-  const handleGenerate = () => {
+  const handleGenerate = async () => {
     if (!prompt.trim() || usedLimit >= totalLimit) return;
     setIsGenerating(true);
-    setTimeout(() => {
+    setGenerateError(null);
+    setGeneratedImage(null);
+
+    try {
+      const res = await fetch(GEMINI_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt,
+          model: selectedModel,
+          style_prompt: selectedStyle?.prompt ?? "",
+          image_base64: uploadedPhoto ?? undefined,
+          mode: "image",
+        }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        setGenerateError(data.error ?? "Ошибка генерации");
+        return;
+      }
+
+      if (data.type === "image" && data.image_base64) {
+        const mime = data.mime_type ?? "image/png";
+        const src = `data:${mime};base64,${data.image_base64}`;
+        setGeneratedImage(src);
+        setGeneratedMime(mime);
+        setUsedLimit(prev => prev + 1);
+        const newItem: HistoryItem = {
+          id: Date.now(),
+          prompt,
+          model: MODELS.find(m => m.id === selectedModel)?.label ?? selectedModel,
+          time: "только что",
+          emoji: selectedStyle?.emoji ?? "🎨",
+          imageBase64: data.image_base64,
+          mimeType: mime,
+        };
+        setHistory(prev => [newItem, ...prev]);
+      } else if (data.text) {
+        setGenerateError(`Gemini ответил текстом: ${data.text}`);
+      } else {
+        setGenerateError("Изображение не получено — попробуй изменить промт");
+      }
+    } catch {
+      setGenerateError("Сетевая ошибка — проверь подключение");
+    } finally {
       setIsGenerating(false);
-      setUsedLimit(prev => prev + 1);
-    }, 2500);
+    }
   };
 
   const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -125,14 +187,27 @@ export default function Index() {
     reader.readAsDataURL(file);
   };
 
-  const handleChat = () => {
-    if (!chatInput.trim()) return;
+  const handleChat = async () => {
+    if (!chatInput.trim() || isChatLoading) return;
     const msg = chatInput;
     setChatInput("");
     setChatMessages(prev => [...prev, { role: "user", text: msg }]);
-    setTimeout(() => {
-      setChatMessages(prev => [...prev, { role: "bot", text: "🤖 Хороший вопрос! Перейди в «Создать», введи промт и при желании добавь своё фото — я сгенерирую изображение через Gemini!" }]);
-    }, 900);
+    setIsChatLoading(true);
+
+    try {
+      const res = await fetch(GEMINI_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: msg, mode: "chat" }),
+      });
+      const data = await res.json();
+      const reply = data.text ?? data.error ?? "Не удалось получить ответ";
+      setChatMessages(prev => [...prev, { role: "bot", text: reply }]);
+    } catch {
+      setChatMessages(prev => [...prev, { role: "bot", text: "⚠️ Ошибка соединения с Gemini" }]);
+    } finally {
+      setIsChatLoading(false);
+    }
   };
 
   const handleAdminLogin = () => {
@@ -289,7 +364,7 @@ export default function Index() {
                 <span className="absolute bottom-3 right-3 text-xs text-muted-foreground">{prompt.length}/500</span>
               </div>
 
-              {/* Generate */}
+              {/* Generate button */}
               <button
                 onClick={handleGenerate}
                 disabled={!prompt.trim() || isGenerating || usedLimit >= totalLimit}
@@ -312,6 +387,35 @@ export default function Index() {
                   `✨ Сгенерировать${selectedStyle ? ` в стиле ${selectedStyle.name}` : ""}`
                 )}
               </button>
+
+              {/* Error */}
+              {generateError && (
+                <div className="p-3 rounded-2xl bg-red-500/10 border border-red-500/30 text-xs text-red-400 leading-relaxed animate-fade-in">
+                  ⚠️ {generateError}
+                </div>
+              )}
+
+              {/* Result image */}
+              {generatedImage && (
+                <div className="animate-scale-in rounded-2xl overflow-hidden border border-[hsl(262_83%_65%/0.5)] relative">
+                  <img
+                    src={generatedImage}
+                    alt="Сгенерированное изображение"
+                    className="w-full object-cover"
+                  />
+                  <div className="absolute bottom-0 left-0 right-0 p-3 bg-gradient-to-t from-black/80 to-transparent flex items-center justify-between">
+                    <span className="text-xs text-white/80">✨ {currentModel.label}</span>
+                    <a
+                      href={generatedImage}
+                      download={`gemini-${Date.now()}.png`}
+                      className="flex items-center gap-1 text-xs bg-white/20 hover:bg-white/30 text-white px-3 py-1.5 rounded-xl transition-colors font-medium"
+                    >
+                      <Icon name="Download" size={11} />
+                      Скачать
+                    </a>
+                  </div>
+                </div>
+              )}
 
               {usedLimit >= totalLimit && (
                 <button className="w-full py-3 rounded-2xl border border-amber-500/50 bg-amber-500/10 text-amber-400 text-sm font-semibold hover:bg-amber-500/20 transition-colors">
@@ -461,38 +565,81 @@ export default function Index() {
               <div className="flex items-center justify-between py-1">
                 <div>
                   <h2 className="text-base font-bold text-white">🕐 История</h2>
-                  <p className="text-xs text-muted-foreground">{HISTORY.length} генерации</p>
+                  <p className="text-xs text-muted-foreground">{history.length} генераций</p>
                 </div>
-                <div className="flex gap-2">
-                  <button className="text-xs px-3 py-1.5 rounded-xl bg-[hsl(225_15%_11%)] border border-[hsl(225_15%_15%)] text-muted-foreground hover:text-white transition-colors">📤 Экспорт</button>
-                  <button className="text-xs px-3 py-1.5 rounded-xl bg-red-500/10 border border-red-500/30 text-red-400 hover:bg-red-500/20 transition-colors">🗑️ Очистить</button>
-                </div>
+                <button
+                  onClick={() => setHistory([])}
+                  className="text-xs px-3 py-1.5 rounded-xl bg-red-500/10 border border-red-500/30 text-red-400 hover:bg-red-500/20 transition-colors"
+                >
+                  🗑️ Очистить
+                </button>
               </div>
-              <div className="space-y-2.5">
-                {HISTORY.map((item, i) => (
-                  <div
-                    key={item.id}
-                    className="p-4 rounded-2xl bg-[hsl(225_15%_11%)] border border-[hsl(225_15%_15%)] animate-fade-in hover:border-[hsl(262_83%_65%/0.3)] transition-colors cursor-pointer"
-                    style={{ animationDelay: `${i * 0.08}s`, opacity: 0 }}
+
+              {history.length === 0 ? (
+                <div className="text-center py-12">
+                  <div className="text-4xl mb-3">🎨</div>
+                  <p className="text-sm text-muted-foreground">История пуста</p>
+                  <p className="text-xs text-muted-foreground mt-1">Создай первое изображение!</p>
+                  <button
+                    onClick={() => setActiveSection("generator")}
+                    className="mt-4 text-xs px-4 py-2 rounded-xl font-semibold text-white"
+                    style={{ background: "linear-gradient(135deg, hsl(262 83% 65%), hsl(180 100% 50%))" }}
                   >
-                    <div className="flex items-start gap-3">
-                      <div className="w-10 h-10 rounded-xl bg-[hsl(225_15%_16%)] flex items-center justify-center text-xl flex-shrink-0">
-                        {item.emoji}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm text-white font-medium leading-snug line-clamp-2">{item.prompt}</p>
-                        <div className="flex items-center gap-2 mt-1.5">
-                          <span className="text-xs px-2 py-0.5 rounded-lg bg-[hsl(262_83%_65%/0.15)] text-[hsl(262_83%_75%)] font-medium">{item.model}</span>
-                          <span className="text-xs text-muted-foreground">{item.time}</span>
+                    ✨ Создать
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-2.5">
+                  {history.map((item, i) => (
+                    <div
+                      key={item.id}
+                      className="rounded-2xl bg-[hsl(225_15%_11%)] border border-[hsl(225_15%_15%)] animate-fade-in hover:border-[hsl(262_83%_65%/0.3)] transition-colors overflow-hidden"
+                      style={{ animationDelay: `${i * 0.06}s`, opacity: 0 }}
+                    >
+                      {item.imageBase64 && (
+                        <div className="relative">
+                          <img
+                            src={`data:${item.mimeType ?? "image/png"};base64,${item.imageBase64}`}
+                            alt={item.prompt}
+                            className="w-full h-36 object-cover"
+                          />
+                          <a
+                            href={`data:${item.mimeType ?? "image/png"};base64,${item.imageBase64}`}
+                            download={`gemini-${item.id}.png`}
+                            className="absolute top-2 right-2 w-7 h-7 rounded-xl bg-black/60 flex items-center justify-center text-white hover:bg-black/80 transition-colors"
+                            onClick={e => e.stopPropagation()}
+                          >
+                            <Icon name="Download" size={12} />
+                          </a>
                         </div>
+                      )}
+                      <div className="p-3 flex items-start gap-3">
+                        <div className="w-8 h-8 rounded-lg bg-[hsl(225_15%_16%)] flex items-center justify-center text-base flex-shrink-0">
+                          {item.emoji}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-xs text-white font-medium leading-snug line-clamp-2">{item.prompt}</p>
+                          <div className="flex items-center gap-2 mt-1">
+                            <span className="text-[10px] px-2 py-0.5 rounded-lg bg-[hsl(262_83%_65%/0.15)] text-[hsl(262_83%_75%)] font-medium">{item.model}</span>
+                            <span className="text-[10px] text-muted-foreground">{item.time}</span>
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => {
+                            setPrompt(item.prompt);
+                            setActiveSection("generator");
+                            setGeneratedImage(null);
+                          }}
+                          className="text-muted-foreground hover:text-[hsl(262_83%_65%)] transition-colors flex-shrink-0"
+                          title="Повторить"
+                        >
+                          <Icon name="RotateCcw" size={13} />
+                        </button>
                       </div>
-                      <button className="text-muted-foreground hover:text-[hsl(262_83%_65%)] transition-colors">
-                        <Icon name="RotateCcw" size={14} />
-                      </button>
                     </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -715,17 +862,19 @@ export default function Index() {
             <div className="animate-fade-in space-y-3">
               <div className="text-center py-1">
                 <div className="text-2xl mb-1">💡</div>
-                <h2 className="text-base font-bold text-white">Помощь</h2>
+                <h2 className="text-base font-bold text-white">Чат с Gemini</h2>
+                <p className="text-xs text-muted-foreground">Реальные ответы от AI</p>
               </div>
-              <div className="bg-[hsl(225_15%_11%)] rounded-2xl border border-[hsl(225_15%_15%)] overflow-hidden">
-                <div className="p-3 border-b border-[hsl(225_15%_15%)] flex items-center gap-2">
+              <div className="bg-[hsl(225_15%_11%)] rounded-2xl border border-[hsl(225_15%_15%)] overflow-hidden flex flex-col" style={{ height: "420px" }}>
+                <div className="p-3 border-b border-[hsl(225_15%_15%)] flex items-center gap-2 flex-shrink-0">
                   <span className="text-sm">🤖</span>
-                  <span className="text-xs font-semibold text-white">Спроси меня</span>
+                  <span className="text-xs font-semibold text-white">Gemini AI</span>
                   <span className="text-xs text-emerald-400 ml-auto flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse-glow"></span>Онлайн
+                    <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse-glow"></span>
+                    {isChatLoading ? "Печатает..." : "Онлайн"}
                   </span>
                 </div>
-                <div className="h-36 overflow-y-auto p-3 space-y-2">
+                <div className="flex-1 overflow-y-auto p-3 space-y-2">
                   {chatMessages.map((msg, i) => (
                     <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
                       <div className={`max-w-[85%] text-xs px-3 py-2 rounded-xl leading-relaxed ${msg.role === "user" ? "bg-gradient-to-r from-[hsl(262_83%_65%)] to-[hsl(180_100%_50%)] text-white rounded-br-sm" : "bg-[hsl(225_15%_16%)] text-white rounded-bl-sm"}`}>
@@ -733,10 +882,33 @@ export default function Index() {
                       </div>
                     </div>
                   ))}
+                  {isChatLoading && (
+                    <div className="flex justify-start">
+                      <div className="bg-[hsl(225_15%_16%)] px-4 py-2.5 rounded-xl rounded-bl-sm">
+                        <div className="flex gap-1">
+                          <span className="w-1.5 h-1.5 bg-muted-foreground rounded-full animate-bounce" style={{ animationDelay: "0ms" }}></span>
+                          <span className="w-1.5 h-1.5 bg-muted-foreground rounded-full animate-bounce" style={{ animationDelay: "150ms" }}></span>
+                          <span className="w-1.5 h-1.5 bg-muted-foreground rounded-full animate-bounce" style={{ animationDelay: "300ms" }}></span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  <div ref={chatEndRef} />
                 </div>
-                <div className="p-3 border-t border-[hsl(225_15%_15%)] flex gap-2">
-                  <input value={chatInput} onChange={e => setChatInput(e.target.value)} onKeyDown={e => e.key === "Enter" && handleChat()} placeholder="Задай вопрос..." className="flex-1 text-xs bg-[hsl(225_15%_14%)] border border-[hsl(225_15%_18%)] rounded-xl px-3 py-2 text-white placeholder:text-muted-foreground focus:outline-none focus:border-[hsl(262_83%_65%/0.5)]" />
-                  <button onClick={handleChat} className="w-8 h-8 rounded-xl flex items-center justify-center text-white" style={{ background: "linear-gradient(135deg, hsl(262 83% 65%), hsl(180 100% 50%))" }}>
+                <div className="p-3 border-t border-[hsl(225_15%_15%)] flex gap-2 flex-shrink-0">
+                  <input
+                    value={chatInput}
+                    onChange={e => setChatInput(e.target.value)}
+                    onKeyDown={e => e.key === "Enter" && !isChatLoading && handleChat()}
+                    placeholder="Задай любой вопрос Gemini..."
+                    className="flex-1 text-xs bg-[hsl(225_15%_14%)] border border-[hsl(225_15%_18%)] rounded-xl px-3 py-2 text-white placeholder:text-muted-foreground focus:outline-none focus:border-[hsl(262_83%_65%/0.5)]"
+                  />
+                  <button
+                    onClick={handleChat}
+                    disabled={isChatLoading || !chatInput.trim()}
+                    className="w-8 h-8 rounded-xl flex items-center justify-center text-white disabled:opacity-50 transition-opacity"
+                    style={{ background: "linear-gradient(135deg, hsl(262 83% 65%), hsl(180 100% 50%))" }}
+                  >
                     <Icon name="Send" size={12} />
                   </button>
                 </div>
